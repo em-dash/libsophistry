@@ -42,8 +42,9 @@ pub fn parseArgs(
     comptime _args_decl: []const Argument,
     inputs: []const [:0]const u8,
     comptime options: ParseArgsOptions,
-) !Result(_args_decl) {
+) std.meta.Tuple(&.{ Result(_args_decl), std.StaticBitSet(_args_decl.len) }) {
     var result: Result(_args_decl) = .{};
+    var unused = std.StaticBitSet(_args_decl.len).initFull();
     const args = comptime block: {
         var seen_short_args: []const u8 = &.{};
         var seen_long_args: []const []const u8 = &.{};
@@ -68,12 +69,12 @@ pub fn parseArgs(
                 };
 
                 if (new.bool.short_true) |t| {
-                    if (std.mem.containsAtLeast(u8, seen_short_args, 1, &[_]u8{t}))
+                    if (std.mem.containsAtLeastScalar(u8, seen_short_args, 1, t))
                         @compileError("Found duplicate short option " ++ &[_]u8{t});
                     seen_short_args = seen_short_args ++ &[_]u8{t};
                 }
                 if (new.bool.short_false) |f| {
-                    if (std.mem.containsAtLeast(u8, seen_short_args, 1, &[_]u8{f}))
+                    if (std.mem.containsAtLeastScalar(u8, seen_short_args, 1, f))
                         @compileError("Found duplicate short option " ++ &[_]u8{f});
                     seen_short_args = seen_short_args ++ &[_]u8{f};
                 }
@@ -97,25 +98,44 @@ pub fn parseArgs(
         break :block args_decl;
     };
 
-    for (inputs) |input| inline for (args) |argument| switch (argument) {
+    for (inputs, 0..) |input, index| inline for (args) |argument| switch (argument) {
         .bool => |b| {
-            if (input.len >= 2 and std.mem.eql(u8, "--", input[0..2])) {
+            if (input.len > 2 and std.mem.eql(u8, "--", input[0..2])) {
                 if (b.long) |long| {
-                    if (std.mem.eql(u8, long.manual.true.?, input[2..]))
+                    if (std.mem.eql(u8, long.manual.true.?, input[2..])) {
                         @field(result, b.name) = true;
-                    if (std.mem.eql(u8, long.manual.false.?, input[2..]))
+                        unused.unset(index);
+                    }
+                    if (std.mem.eql(u8, long.manual.false.?, input[2..])) {
                         @field(result, b.name) = false;
+                        unused.unset(index);
+                    }
+                }
+            }
+
+            if (input.len >= 2 and input[0] == '-') {
+                if (b.short_true) |t| {
+                    if (std.mem.containsAtLeastScalar(u8, input[1..], 1, t)) {
+                        @field(result, b.name) = true;
+                        unused.unset(index);
+                    }
+                }
+                if (b.short_false) |f| {
+                    if (std.mem.containsAtLeastScalar(u8, input[1..], 1, f)) {
+                        @field(result, b.name) = false;
+                        unused.unset(index);
+                    }
                 }
             }
         },
     };
 
-    return .{};
+    return .{ result, unused };
 }
 
 test {
     {
-        const actual = try parseArgs(
+        const actual, const unused = parseArgs(
             &[_]Argument{
                 .{ .bool = .{
                     .name = "blep",
@@ -128,12 +148,14 @@ test {
                     .name = "mlem",
                     .default = false,
                     .long = .{ .auto = "lol" },
+                    .short_true = 'm',
                 } },
             },
-            &[_][:0]const u8{},
+            &[_][:0]const u8{"-B -m"},
             .{},
         );
-        try std.testing.expectEqual(@TypeOf(actual){ .blep = true, .mlem = false }, actual);
+        _ = unused;
+        try std.testing.expectEqual(@TypeOf(actual){ .blep = false, .mlem = true }, actual);
     }
 }
 
