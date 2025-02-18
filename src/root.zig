@@ -38,13 +38,20 @@ fn Result(comptime args_decl: []const Argument) type {
     } });
 }
 
+/// Parse commandline arguments based on provided declaration.
+///
+/// Can only fail if `allocator != null`.
 pub fn parseArgs(
+    /// Required to generate an unused argument list.
+    allocator: ?std.mem.Allocator,
     comptime _args_decl: []const Argument,
     inputs: []const [:0]const u8,
     comptime options: ParseArgsOptions,
-) std.meta.Tuple(&.{ Result(_args_decl), std.StaticBitSet(_args_decl.len) }) {
+) !std.meta.Tuple(&.{ Result(_args_decl), []const [:0]const u8 }) {
     var result: Result(_args_decl) = .{};
-    var unused = std.StaticBitSet(_args_decl.len).initFull();
+    // `.toOwnedSlice` called at the end of this function
+    var unused: std.ArrayListUnmanaged([:0]const u8) = .empty;
+    errdefer if (allocator) |a| unused.deinit(a);
     const args = comptime block: {
         var seen_short_args: []const u8 = &.{};
         var seen_long_args: []const []const u8 = &.{};
@@ -98,44 +105,51 @@ pub fn parseArgs(
         break :block args_decl;
     };
 
-    for (inputs, 0..) |input, index| inline for (args) |argument| switch (argument) {
-        .bool => |b| {
-            if (input.len > 2 and std.mem.eql(u8, "--", input[0..2])) {
-                if (b.long) |long| {
-                    if (std.mem.eql(u8, long.manual.true.?, input[2..])) {
-                        @field(result, b.name) = true;
-                        unused.unset(index);
+    for (inputs) |input| {
+        var used_argument: bool = false;
+        inline for (args) |argument| {
+            switch (argument) {
+                .bool => |b| {
+                    if (input.len > 2 and std.mem.eql(u8, "--", input[0..2])) {
+                        if (b.long) |long| {
+                            if (std.mem.eql(u8, long.manual.true.?, input[2..])) {
+                                @field(result, b.name) = true;
+                                used_argument = true;
+                            }
+                            if (std.mem.eql(u8, long.manual.false.?, input[2..])) {
+                                @field(result, b.name) = false;
+                                used_argument = true;
+                            }
+                        }
                     }
-                    if (std.mem.eql(u8, long.manual.false.?, input[2..])) {
-                        @field(result, b.name) = false;
-                        unused.unset(index);
-                    }
-                }
-            }
 
-            if (input.len >= 2 and input[0] == '-') {
-                if (b.short_true) |t| {
-                    if (std.mem.containsAtLeastScalar(u8, input[1..], 1, t)) {
-                        @field(result, b.name) = true;
-                        unused.unset(index);
+                    if (input.len >= 2 and input[0] == '-') {
+                        if (b.short_true) |t| {
+                            if (std.mem.containsAtLeastScalar(u8, input[1..], 1, t)) {
+                                @field(result, b.name) = true;
+                                used_argument = true;
+                            }
+                        }
+                        if (b.short_false) |f| {
+                            if (std.mem.containsAtLeastScalar(u8, input[1..], 1, f)) {
+                                @field(result, b.name) = false;
+                                used_argument = true;
+                            }
+                        }
                     }
-                }
-                if (b.short_false) |f| {
-                    if (std.mem.containsAtLeastScalar(u8, input[1..], 1, f)) {
-                        @field(result, b.name) = false;
-                        unused.unset(index);
-                    }
-                }
+                },
             }
-        },
-    };
+        }
+        if (!used_argument) if (allocator) |a| try unused.append(a, input);
+    }
 
-    return .{ result, unused };
+    return .{ result, if (allocator) |a| try unused.toOwnedSlice(a) else &[_][:0]const u8{} };
 }
 
 test {
     {
-        const actual, const unused = parseArgs(
+        const actual, const unused = try parseArgs(
+            std.testing.allocator,
             &[_]Argument{
                 .{ .bool = .{
                     .name = "blep",
@@ -151,10 +165,10 @@ test {
                     .short_true = 'm',
                 } },
             },
-            &[_][:0]const u8{"-B -m"},
+            &[_][:0]const u8{ "-B", "-m", "chat", "chien" },
             .{},
         );
-        _ = unused;
+        defer std.testing.allocator.free(unused);
         try std.testing.expectEqual(@TypeOf(actual){ .blep = false, .mlem = true }, actual);
     }
 }
